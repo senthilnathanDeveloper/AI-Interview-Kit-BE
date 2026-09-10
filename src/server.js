@@ -16,24 +16,32 @@ app.use(express.json({ limit: '10mb' }));
 
 // Middleware to ensure DB connection on serverless functions (Vercel)
 let isConnected = false;
+let lastDbError = null;
+
 async function connectDb() {
   if (isConnected || mongoose.connection.readyState === 1) {
     isConnected = true;
-    return true;
+    lastDbError = null;
+    return { success: true, error: null };
   }
   try {
     if (!process.env.MONGODB_URI) {
-      console.warn(`[Database] MONGODB_URI is not set! Using default local URI.`);
+      const msg = 'MONGODB_URI environment variable is missing in Vercel settings. Falling back to local default which cannot run on Vercel cloud.';
+      console.warn(`[Database] ${msg}`);
+      lastDbError = msg;
+      return { success: false, error: msg };
     }
     await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000 // 5 seconds timeout instead of 10s
+      serverSelectionTimeoutMS: 5000
     });
     isConnected = true;
+    lastDbError = null;
     console.log(`[Database] Connected to MongoDB`);
-    return true;
+    return { success: true, error: null };
   } catch (err) {
     console.error(`[Database] Connection error:`, err.message);
-    return false;
+    lastDbError = err.message;
+    return { success: false, error: err.message };
   }
 }
 
@@ -41,10 +49,10 @@ app.use(async (req, res, next) => {
   if (req.path === '/') {
     return next();
   }
-  const connected = await connectDb();
-  if (!connected && mongoose.connection.readyState !== 1 && req.path !== '/api/health') {
+  const connResult = await connectDb();
+  if (!connResult.success && mongoose.connection.readyState !== 1 && req.path !== '/api/health') {
     return res.status(500).json({
-      error: 'Database connection failed. Please ensure MONGODB_URI is configured in Vercel project settings and MongoDB Atlas IP access list includes 0.0.0.0/0.'
+      error: `Database connection failed: ${connResult.error || 'Check MONGODB_URI in Vercel settings.'}`
     });
   }
   next();
@@ -57,20 +65,15 @@ app.use('/api/kits', kitRoutes);
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   let dbStatus = 'disconnected';
-  let dbError = null;
-  try {
-    const isConn = await connectDb();
-    if (isConn || mongoose.connection.readyState === 1) {
-      dbStatus = 'connected';
-    }
-  } catch (err) {
-    dbError = err.message;
+  const connResult = await connectDb();
+  if (connResult.success || mongoose.connection.readyState === 1) {
+    dbStatus = 'connected';
   }
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     mongodb: dbStatus,
-    error: dbError
+    error: connResult.error || lastDbError
   });
 });
 
