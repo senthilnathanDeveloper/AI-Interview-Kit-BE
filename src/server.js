@@ -19,19 +19,34 @@ let isConnected = false;
 async function connectDb() {
   if (isConnected || mongoose.connection.readyState === 1) {
     isConnected = true;
-    return;
+    return true;
   }
   try {
-    await mongoose.connect(MONGODB_URI);
+    if (!process.env.MONGODB_URI) {
+      console.warn(`[Database] MONGODB_URI is not set! Using default local URI.`);
+    }
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 5000 // 5 seconds timeout instead of 10s
+    });
     isConnected = true;
     console.log(`[Database] Connected to MongoDB`);
+    return true;
   } catch (err) {
     console.error(`[Database] Connection error:`, err.message);
+    return false;
   }
 }
 
 app.use(async (req, res, next) => {
-  await connectDb();
+  if (req.path === '/') {
+    return next();
+  }
+  const connected = await connectDb();
+  if (!connected && mongoose.connection.readyState !== 1 && req.path !== '/api/health') {
+    return res.status(500).json({
+      error: 'Database connection failed. Please ensure MONGODB_URI is configured in Vercel project settings and MongoDB Atlas IP access list includes 0.0.0.0/0.'
+    });
+  }
   next();
 });
 
@@ -40,11 +55,22 @@ app.use('/api/auth', authRoutes);
 app.use('/api/kits', kitRoutes);
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  let dbStatus = 'disconnected';
+  let dbError = null;
+  try {
+    const isConn = await connectDb();
+    if (isConn || mongoose.connection.readyState === 1) {
+      dbStatus = 'connected';
+    }
+  } catch (err) {
+    dbError = err.message;
+  }
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    mongodb: dbStatus,
+    error: dbError
   });
 });
 
